@@ -6,7 +6,7 @@ patch_root="$repository_root/patches/libdovi"
 native_source_root="$repository_root/native"
 output_root="$repository_root/OUTPUT/native"
 android_api="${ANDROID_API:-24}"
-package_version="$(sed -n 's/^VERSION_NAME=//p' "$repository_root/gradle.properties" | head -n 1)"
+package_version="$(sed -n 's/^VERSION_NAME=//p' "$repository_root/gradle.properties" | head -n 1 | tr -d '\r')"
 temp_base="${TMPDIR:-/tmp}"
 
 if [ -z "$package_version" ]; then
@@ -51,8 +51,10 @@ git clone --depth 1 --branch main https://github.com/quietvoid/dovi_tool.git "$d
 source_sha="$(git -C "$dovi_tool" rev-parse HEAD)"
 
 for patch in "$patch_root"/*.patch; do
-    git -C "$dovi_tool" apply --check "$patch"
-    git -C "$dovi_tool" apply "$patch"
+    normalized_patch="$source_root/$(basename "$patch")"
+    sed 's/\r$//' "$patch" > "$normalized_patch"
+    git -C "$dovi_tool" apply --check "$normalized_patch"
+    git -C "$dovi_tool" apply "$normalized_patch"
 done
 
 export CARGO_TARGET_DIR="$source_root/target"

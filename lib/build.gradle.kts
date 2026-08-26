@@ -21,7 +21,7 @@ android {
     }
 
     sourceSets {
-        getByName("main").jniLibs.srcDir(nativeOutput)
+        getByName("main").jniLibs.directories.add(nativeOutput.asFile.absolutePath)
     }
 
     packaging {

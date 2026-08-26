@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 gradle_root="$(cd "$repo/../.." && pwd)"
-android_ndk_version="$(sed -n 's/^androidNdkVersion=//p' "$repo/gradle.properties" | head -n 1)"
-package_version="$(sed -n 's/^VERSION_NAME=//p' "$repo/gradle.properties" | head -n 1)"
+android_ndk_version="$(sed -n 's/^androidNdkVersion=//p' "$repo/gradle.properties" | head -n 1 | tr -d '\r')"
+package_version="$(sed -n 's/^VERSION_NAME=//p' "$repo/gradle.properties" | head -n 1 | tr -d '\r')"
 download_root=""
 gradle_launcher=""
 

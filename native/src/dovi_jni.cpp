@@ -36,6 +36,13 @@ private:
 	jbyte* bytes_ = nullptr;
 };
 
+class OwnedDoviBuffer {
+public:
+	~OwnedDoviBuffer() { dovi_owned_buffer_free(&value); }
+
+	dovi_owned_buffer value{};
+};
+
 bool read_output_size(JNIEnv* env, jlongArray sizes, uint64_t* size) {
 	jlong value = 0;
 	env->GetLongArrayRegion(sizes, 0, 1, &value);
@@ -52,6 +59,12 @@ bool valid_long_destination(JNIEnv* env, jlongArray destination, jsize minimum_s
 bool valid_int_destination(JNIEnv* env, jintArray destination, jsize minimum_size) {
 	return destination != nullptr && env->GetArrayLength(destination) >= minimum_size &&
 		!env->ExceptionCheck();
+}
+
+bool write_status(JNIEnv* env, jintArray destination, dovi_status status) {
+	const auto value = static_cast<jint>(status);
+	env->SetIntArrayRegion(destination, 0, 1, &value);
+	return !env->ExceptionCheck();
 }
 
 void write_output_size(JNIEnv* env, jlongArray sizes, uint64_t size) {
@@ -76,12 +89,13 @@ bool write_inspection(JNIEnv* env, jintArray destination, const dovi_sample_info
 }
 
 bool write_transform_info(JNIEnv* env, jintArray destination, const dovi_transform_info& info) {
-	const std::array<jint, 5> values{
+	const std::array<jint, 6> values{
 		static_cast<jint>(info.output_presentation),
 		static_cast<jint>(info.applied_repair_flags),
 		static_cast<jint>(info.converted_rpu_count),
 		static_cast<jint>(info.dropped_dovi_nal_count),
 		static_cast<jint>(info.preserved_nal_count),
+		static_cast<jint>(info.input_presentation),
 	};
 	env->SetIntArrayRegion(destination, 0, values.size(), values.data());
 	return !env->ExceptionCheck();
@@ -89,21 +103,32 @@ bool write_transform_info(JNIEnv* env, jintArray destination, const dovi_transfo
 
 dovi_sample make_sample(
 	const ByteArrayAccess& input,
+	jint input_offset,
+	jint input_size,
 	jint framing,
 	jint nal_length_size,
 	jint source_base_presentation,
-	const ByteArrayAccess& supplemental
+	const ByteArrayAccess& supplemental,
+	jint supplemental_offset,
+	jint supplemental_size
 ) {
 	return {
 		sizeof(dovi_sample),
 		static_cast<uint32_t>(framing),
 		static_cast<uint32_t>(nal_length_size),
 		static_cast<uint32_t>(source_base_presentation),
-		input.data(),
-		input.size(),
-		supplemental.data(),
-		supplemental.size(),
+		input.data() + input_offset,
+		static_cast<uint64_t>(input_size),
+		supplemental.data() == nullptr ? nullptr : supplemental.data() + supplemental_offset,
+		static_cast<uint64_t>(supplemental_size),
 	};
+}
+
+bool valid_range(const ByteArrayAccess& array, jint offset, jint size, bool require_non_empty) {
+	if (offset < 0 || size < 0 || (require_non_empty && size == 0)) return false;
+	const auto start = static_cast<uint64_t>(offset);
+	const auto length = static_cast<uint64_t>(size);
+	return start <= array.size() && length <= array.size() - start;
 }
 
 } // namespace
@@ -125,10 +150,14 @@ Java_io_github_thor2002ro_libdovi_DoviBridge_nativeInspectSample(
 	JNIEnv* env,
 	jobject,
 	jbyteArray input_array,
+	jint input_offset,
+	jint input_size,
 	jint framing,
 	jint nal_length_size,
 	jint source_base_presentation,
 	jbyteArray supplemental_array,
+	jint supplemental_offset,
+	jint supplemental_size,
 	jintArray info_array
 ) {
 	try {
@@ -138,8 +167,13 @@ Java_io_github_thor2002ro_libdovi_DoviBridge_nativeInspectSample(
 		ByteArrayAccess input(env, input_array);
 		ByteArrayAccess supplemental(env, supplemental_array);
 		if (!input.valid() || !supplemental.valid()) return DOVI_INTERNAL_ERROR;
+		if (!valid_range(input, input_offset, input_size, true) ||
+			!valid_range(supplemental, supplemental_offset, supplemental_size, false)) {
+			return DOVI_INVALID_ARGUMENT;
+		}
 		const auto sample = make_sample(
-			input, framing, nal_length_size, source_base_presentation, supplemental);
+			input, input_offset, input_size, framing, nal_length_size, source_base_presentation,
+			supplemental, supplemental_offset, supplemental_size);
 		dovi_sample_info info{};
 		const auto status = dovi_inspect_sample(&sample, &info);
 		if (status == DOVI_OK && !write_inspection(env, info_array, info)) {
@@ -156,10 +190,14 @@ Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample(
 	JNIEnv* env,
 	jobject,
 	jbyteArray input_array,
+	jint input_offset,
+	jint input_size,
 	jint framing,
 	jint nal_length_size,
 	jint source_base_presentation,
 	jbyteArray supplemental_array,
+	jint supplemental_offset,
+	jint supplemental_size,
 	jint target,
 	jint repair_flags,
 	jbyteArray output_array,
@@ -169,18 +207,23 @@ Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample(
 	try {
 		if (input_array == nullptr ||
 			!valid_long_destination(env, output_size_array, 1) ||
-			!valid_int_destination(env, info_array, 5)) {
+			!valid_int_destination(env, info_array, 6)) {
 			return DOVI_INVALID_ARGUMENT;
 		}
 		ByteArrayAccess input(env, input_array);
 		ByteArrayAccess supplemental(env, supplemental_array);
 		ByteArrayAccess output(env, output_array, true);
 		if (!input.valid() || !supplemental.valid() || !output.valid()) return DOVI_INTERNAL_ERROR;
+		if (!valid_range(input, input_offset, input_size, true) ||
+			!valid_range(supplemental, supplemental_offset, supplemental_size, false)) {
+			return DOVI_INVALID_ARGUMENT;
+		}
 		uint64_t output_size = 0;
 		if (!read_output_size(env, output_size_array, &output_size)) return DOVI_INVALID_ARGUMENT;
 		if (output_array != nullptr && output_size > output.size()) return DOVI_INVALID_ARGUMENT;
 		const auto sample = make_sample(
-			input, framing, nal_length_size, source_base_presentation, supplemental);
+			input, input_offset, input_size, framing, nal_length_size, source_base_presentation,
+			supplemental, supplemental_offset, supplemental_size);
 		const dovi_transform_request request{
 			sizeof(dovi_transform_request),
 			static_cast<uint32_t>(target),
@@ -198,6 +241,83 @@ Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample(
 		return status;
 	} catch (...) {
 		return DOVI_INTERNAL_ERROR;
+	}
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSampleAllocated(
+	JNIEnv* env,
+	jobject,
+	jbyteArray input_array,
+	jint input_offset,
+	jint input_size,
+	jint framing,
+	jint nal_length_size,
+	jint source_base_presentation,
+	jbyteArray supplemental_array,
+	jint supplemental_offset,
+	jint supplemental_size,
+	jint target,
+	jint repair_flags,
+	jintArray status_array,
+	jintArray info_array
+) {
+	try {
+		if (input_array == nullptr ||
+			!valid_int_destination(env, status_array, 1) ||
+			!valid_int_destination(env, info_array, 6)) {
+			return nullptr;
+		}
+		ByteArrayAccess input(env, input_array);
+		ByteArrayAccess supplemental(env, supplemental_array);
+		if (!input.valid() || !supplemental.valid()) {
+			write_status(env, status_array, DOVI_INTERNAL_ERROR);
+			return nullptr;
+		}
+		if (!valid_range(input, input_offset, input_size, true) ||
+			!valid_range(supplemental, supplemental_offset, supplemental_size, false)) {
+			write_status(env, status_array, DOVI_INVALID_ARGUMENT);
+			return nullptr;
+		}
+		const auto sample = make_sample(
+			input, input_offset, input_size, framing, nal_length_size, source_base_presentation,
+			supplemental, supplemental_offset, supplemental_size);
+		const dovi_transform_request request{
+			sizeof(dovi_transform_request),
+			static_cast<uint32_t>(target),
+			static_cast<uint32_t>(repair_flags),
+			0,
+		};
+		dovi_transform_info info{};
+		OwnedDoviBuffer output;
+		auto status = dovi_transform_sample_alloc(
+			&sample, &request, &output.value, &info);
+		if (status != DOVI_OK) {
+			write_status(env, status_array, status);
+			return nullptr;
+		}
+		if (output.value.size == 0 ||
+			output.value.size > static_cast<uint64_t>(std::numeric_limits<jsize>::max())) {
+			write_status(env, status_array, DOVI_INTERNAL_ERROR);
+			return nullptr;
+		}
+		auto bytes = env->NewByteArray(static_cast<jsize>(output.value.size));
+		if (bytes == nullptr || env->ExceptionCheck()) return nullptr;
+		env->SetByteArrayRegion(
+			bytes,
+			0,
+			static_cast<jsize>(output.value.size),
+			reinterpret_cast<const jbyte*>(output.value.data));
+		if (env->ExceptionCheck() || !write_transform_info(env, info_array, info) ||
+			!write_status(env, status_array, DOVI_OK)) {
+			return nullptr;
+		}
+		return bytes;
+	} catch (...) {
+		if (status_array != nullptr && !env->ExceptionCheck()) {
+			write_status(env, status_array, DOVI_INTERNAL_ERROR);
+		}
+		return nullptr;
 	}
 }
 
@@ -269,6 +389,24 @@ Java_io_github_thor2002ro_libdovi_DoviBridge_nativeConsumeMpvError(
 ) {
 	if (generation <= 0) return DOVI_INVALID_ARGUMENT;
 	return static_cast<jint>(dovi_consume_mpv_error_v3(static_cast<uint64_t>(generation)));
+}
+
+JNIEXPORT jint JNICALL
+Java_io_github_thor2002ro_libdovi_DoviBridge_nativeGetMpvTransformObservation(
+	JNIEnv* env,
+	jobject,
+	jlong generation,
+	jintArray info_array
+) {
+	if (generation <= 0 || !valid_int_destination(env, info_array, 2)) return DOVI_INVALID_ARGUMENT;
+	dovi_transform_info info{};
+	if (dovi_get_mpv_transform_info_v3(static_cast<uint64_t>(generation), &info) == 0) return 0;
+	const std::array<jint, 2> values{
+		static_cast<jint>(info.input_presentation),
+		static_cast<jint>(info.output_presentation),
+	};
+	env->SetIntArrayRegion(info_array, 0, values.size(), values.data());
+	return env->ExceptionCheck() ? DOVI_INTERNAL_ERROR : 1;
 }
 
 } // extern "C"

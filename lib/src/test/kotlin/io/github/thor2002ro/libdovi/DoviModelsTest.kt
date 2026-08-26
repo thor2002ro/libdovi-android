@@ -3,6 +3,7 @@ package io.github.thor2002ro.libdovi
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -153,6 +154,33 @@ class DoviModelsTest {
 	}
 
 	@Test
+	fun `sample validates reusable input ranges`() {
+		val bytes = byteArrayOf(9, 1, 2, 3, 9)
+		val supplemental = byteArrayOf(8, 4, 5, 8)
+		val sample = DoviSample(
+			bytes = bytes,
+			supplementalRpu = supplemental,
+			bytesOffset = 1,
+			bytesSize = 3,
+			supplementalRpuOffset = 1,
+			supplementalRpuSize = 2,
+		)
+
+		assertSame(bytes, sample.bytes)
+		assertSame(supplemental, sample.supplementalRpu)
+		assertEquals(1, sample.bytesOffset)
+		assertEquals(3, sample.bytesSize)
+		assertEquals(1, sample.supplementalRpuOffset)
+		assertEquals(2, sample.supplementalRpuSize)
+		assertThrows(IllegalArgumentException::class.java) {
+			DoviSample(bytes = bytes, bytesOffset = 4, bytesSize = 2)
+		}
+		assertThrows(IllegalArgumentException::class.java) {
+			DoviSample(bytes = bytes, supplementalRpuSize = 1)
+		}
+	}
+
+	@Test
 	fun `unavailable library is cached without invoking an operation`() {
 		val backend = FakeDoviBackend(initializeFailure = UnsatisfiedLinkError("missing"))
 		val api = DoviApi(backend)
@@ -212,6 +240,7 @@ class DoviModelsTest {
 				bytes = byteArrayOf(10, 20, 30),
 				output = DoviPresentation.PROFILE_8_1,
 				appliedRepairs = setOf(DoviRepair.REMOVE_MAPPING),
+				input = DoviPresentation.PROFILE_7_FEL,
 			)
 			av1Result = byteArrayOf(1, 2, 3)
 		}
@@ -229,6 +258,183 @@ class DoviModelsTest {
 			backend.av1Result,
 			api.writeAv1T35(byteArrayOf(9), DoviRpuFormat.RAW, completeObu = false),
 		)
+	}
+
+	@Test
+	fun `streaming transform reuses caller-owned output storage`() {
+		val backend = FakeDoviBackend().apply {
+			transformResult = DoviTransformResult(
+				bytes = byteArrayOf(10, 20, 30),
+				output = DoviPresentation.PROFILE_8_1,
+				appliedRepairs = emptySet(),
+				input = DoviPresentation.PROFILE_7_FEL,
+			)
+		}
+		val api = DoviApi(backend)
+		val buffer = DoviTransformBuffer()
+		val request = DoviTransformRequest(DoviTarget.PROFILE_8_1)
+
+		val first = api.transform(sample(), request, buffer)
+		val second = api.transform(sample(), request, buffer)
+
+		assertSame(first.bytes, second.bytes)
+		assertEquals(3, second.bytesSize)
+		assertArrayEquals(byteArrayOf(10, 20, 30), second.bytes.copyOf(second.bytesSize))
+	}
+
+	@Test
+	fun `transform buffer keeps spare capacity for growing video samples`() {
+		val buffer = DoviTransformBuffer()
+		buffer.ensureCapacity(1_000)
+		val bytes = buffer.bytes
+
+		buffer.ensureCapacity(1_001)
+
+		assertSame(bytes, buffer.bytes)
+	}
+
+	@Test
+	fun `fast source base session validates once then filters Dolby Vision NAL units`() {
+		val validation = annexBNal(type = 1, payload = byteArrayOf(0x11))
+		val retainedVps = annexBNal(type = 32, payload = byteArrayOf(0x21), startCodeLength = 3)
+		val retainedVideo = annexBNal(type = 1, payload = byteArrayOf(0x01, 0x02))
+		val droppedRpu = annexBNal(type = 62, payload = byteArrayOf(0x3e))
+		val droppedEnhancement = annexBNal(type = 1, layer = 1, payload = byteArrayOf(0x31))
+		val droppedUnspecified = annexBNal(type = 63, payload = byteArrayOf(0x3f))
+		val backend = FakeDoviBackend().apply {
+			transformResult = DoviTransformResult(
+				bytes = validation,
+				output = DoviPresentation.HDR10,
+				appliedRepairs = emptySet(),
+				input = DoviPresentation.PROFILE_8_1,
+			)
+		}
+		val session = DoviApi(backend).openTransformSession(
+			DoviTransformRequest(DoviTarget.SOURCE_BASE_PRESENTATION),
+			DoviTransformStrategy.FAST_SOURCE_BASE_FALLBACK,
+		)
+		val buffer = DoviTransformBuffer()
+
+		session.transform(sourceBaseSample(validation), buffer)
+		assertEquals(DoviTransformProcessor.FAST_HDR_BASE, session.processor)
+		val second = session.transform(
+			sourceBaseSample(retainedVps + droppedRpu + retainedVideo + droppedEnhancement + droppedUnspecified),
+			buffer,
+		)
+
+		assertEquals(1, backend.transformCalls)
+		assertEquals(DoviTransformProcessor.FAST_HDR_BASE, session.processor)
+		assertArrayEquals(
+			retainedVps + retainedVideo,
+			second.bytes.copyOf(second.bytesSize),
+		)
+		assertEquals(DoviPresentation.PROFILE_8_1, second.input)
+		assertEquals(DoviPresentation.HDR10, second.output)
+	}
+
+	@Test
+	fun `fast source base rejection falls back to libdovi for the remaining session`() {
+		val valid = annexBNal(type = 1)
+		val malformed = byteArrayOf(1, 2, 3)
+		val backend = FakeDoviBackend().apply {
+			transformResult = DoviTransformResult(
+				bytes = valid,
+				output = DoviPresentation.HDR10_PLUS,
+				appliedRepairs = emptySet(),
+				input = DoviPresentation.PROFILE_8_1,
+			)
+		}
+		val session = DoviApi(backend).openTransformSession(
+			DoviTransformRequest(DoviTarget.SOURCE_BASE_PRESENTATION),
+			DoviTransformStrategy.FAST_SOURCE_BASE_FALLBACK,
+		)
+		val buffer = DoviTransformBuffer()
+
+		session.transform(sourceBaseSample(valid, DoviPresentation.HDR10_PLUS), buffer)
+		backend.transformResult = backend.transformResult.copy(bytes = malformed)
+		session.transform(sourceBaseSample(malformed, DoviPresentation.HDR10_PLUS), buffer)
+		assertEquals(DoviTransformProcessor.LIBDOVI, session.processor)
+		session.transform(sourceBaseSample(valid, DoviPresentation.HDR10_PLUS), buffer)
+
+		assertEquals(3, backend.transformCalls)
+		assertEquals(DoviTransformProcessor.LIBDOVI, session.processor)
+	}
+
+	@Test
+	fun `fast source base rejection is shared by sessions for one playback item`() {
+		val valid = annexBNal(type = 1)
+		val malformed = byteArrayOf(1, 2, 3)
+		val backend = FakeDoviBackend().apply {
+			transformResult = DoviTransformResult(
+				bytes = valid,
+				output = DoviPresentation.HDR10,
+				appliedRepairs = emptySet(),
+				input = DoviPresentation.PROFILE_8_1,
+			)
+		}
+		val api = DoviApi(backend)
+		val state = DoviTransformSessionState()
+		val request = DoviTransformRequest(DoviTarget.SOURCE_BASE_PRESENTATION)
+		val firstSession = api.openTransformSession(request, DoviTransformStrategy.FAST_SOURCE_BASE_FALLBACK, state)
+		val buffer = DoviTransformBuffer()
+
+		firstSession.transform(sourceBaseSample(valid), buffer)
+		backend.transformResult = backend.transformResult.copy(bytes = malformed)
+		firstSession.transform(sourceBaseSample(malformed), buffer)
+		val recreatedSession = api.openTransformSession(
+			request,
+			DoviTransformStrategy.FAST_SOURCE_BASE_FALLBACK,
+			state,
+		)
+		backend.transformResult = backend.transformResult.copy(bytes = valid)
+		recreatedSession.transform(sourceBaseSample(valid), buffer)
+		recreatedSession.transform(sourceBaseSample(valid), buffer)
+
+		assertEquals(4, backend.transformCalls)
+		assertEquals(DoviTransformProcessor.LIBDOVI, recreatedSession.processor)
+	}
+
+	@Test
+	fun `fast source base rejects a changed source presentation`() {
+		val valid = annexBNal(type = 1)
+		val backend = FakeDoviBackend().apply {
+			transformResult = DoviTransformResult(
+				bytes = valid,
+				output = DoviPresentation.HDR10,
+				appliedRepairs = emptySet(),
+				input = DoviPresentation.PROFILE_8_1,
+			)
+		}
+		val session = DoviApi(backend).openTransformSession(
+			DoviTransformRequest(DoviTarget.SOURCE_BASE_PRESENTATION),
+			DoviTransformStrategy.FAST_SOURCE_BASE_FALLBACK,
+		)
+		val buffer = DoviTransformBuffer()
+
+		session.transform(sourceBaseSample(valid, DoviPresentation.HDR10), buffer)
+		backend.transformResult = backend.transformResult.copy(output = DoviPresentation.HDR10_PLUS)
+		val result = session.transform(sourceBaseSample(valid, DoviPresentation.HDR10_PLUS), buffer)
+
+		assertEquals(2, backend.transformCalls)
+		assertEquals(DoviPresentation.HDR10_PLUS, result.output)
+		assertEquals(DoviTransformProcessor.LIBDOVI, session.processor)
+	}
+
+	@Test
+	fun `allocated transform publishes the exact native byte array`() {
+		val bytes = byteArrayOf(10, 20, 30)
+
+		val result = exactTransformResult(
+			bytes = bytes,
+			input = DoviPresentation.PROFILE_7_FEL,
+			output = DoviPresentation.PROFILE_8_1,
+			appliedRepairs = setOf(DoviRepair.ZERO_ACTIVE_AREA),
+		)
+
+		assertSame(bytes, result.bytes)
+		assertEquals(DoviPresentation.PROFILE_7_FEL, result.input)
+		assertEquals(DoviPresentation.PROFILE_8_1, result.output)
+		assertEquals(setOf(DoviRepair.ZERO_ACTIVE_AREA), result.appliedRepairs)
 	}
 
 	@Test
@@ -255,6 +461,12 @@ class DoviModelsTest {
 		assertEquals(firstSession, backend.lastResetMpvSession)
 		assertEquals(DoviStatus.RPU_CONVERT_FAILED, api.consumeMpvError(firstSession))
 		assertEquals(firstSession, backend.lastConsumedMpvSession)
+		backend.mpvTransformObservation = DoviTransformObservation(
+			input = DoviPresentation.PROFILE_7_FEL,
+			output = DoviPresentation.PROFILE_8_1,
+		)
+		assertEquals(backend.mpvTransformObservation, api.getMpvTransformObservation(firstSession))
+		assertEquals(firstSession, backend.lastObservedMpvSession)
 	}
 
 	private fun sample(
@@ -266,6 +478,29 @@ class DoviModelsTest {
 		nalLengthSize = nalLengthSize,
 		sourceBasePresentation = DoviPresentation.HDR10,
 	)
+
+	private fun sourceBaseSample(
+		bytes: ByteArray,
+		presentation: DoviPresentation = DoviPresentation.HDR10,
+	) = DoviSample(
+		bytes = bytes,
+		framing = DoviFraming.ANNEX_B,
+		sourceBasePresentation = presentation,
+	)
+
+	private fun annexBNal(
+		type: Int,
+		layer: Int = 0,
+		payload: ByteArray = byteArrayOf(0x01),
+		startCodeLength: Int = 4,
+	): ByteArray {
+		val prefix = if (startCodeLength == 3) byteArrayOf(0, 0, 1) else byteArrayOf(0, 0, 0, 1)
+		val header = byteArrayOf(
+			((type shl 1) or ((layer ushr 5) and 1)).toByte(),
+			((layer and 0x1f) shl 3).toByte(),
+		)
+		return prefix + header + payload
+	}
 }
 
 private class FakeDoviBackend(
@@ -275,6 +510,7 @@ private class FakeDoviBackend(
 	var inspectCalls = 0
 	var capabilityCalls = 0
 	var resetMpvErrorCalls = 0
+	var transformCalls = 0
 
 	var lastInspectedSample: DoviSample? = null
 	var lastTransformRequest: DoviTransformRequest? = null
@@ -282,6 +518,7 @@ private class FakeDoviBackend(
 	var lastMpvRequest: DoviTransformRequest? = null
 	var lastResetMpvSession: DoviMpvSession? = null
 	var lastConsumedMpvSession: DoviMpvSession? = null
+	var lastObservedMpvSession: DoviMpvSession? = null
 	private var nextMpvGeneration = 0L
 
 	var inspectFailure: DoviException? = null
@@ -297,10 +534,12 @@ private class FakeDoviBackend(
 		bytes = byteArrayOf(1),
 		output = DoviPresentation.PROFILE_8_1,
 		appliedRepairs = emptySet(),
+		input = DoviPresentation.PROFILE_7_MEL,
 	)
 	var av1Result = byteArrayOf(1)
 	var capabilityResult: Set<DoviCapability> = setOf(DoviCapability.INSPECT)
 	var consumedMpvStatus = DoviStatus.OK
+	var mpvTransformObservation: DoviTransformObservation? = null
 
 	override fun initialize() {
 		initializeCalls++
@@ -318,6 +557,7 @@ private class FakeDoviBackend(
 		sample: DoviSample,
 		request: DoviTransformRequest,
 	): DoviTransformResult {
+		transformCalls++
 		lastTransformRequest = request
 		return transformResult
 	}
@@ -349,6 +589,11 @@ private class FakeDoviBackend(
 	override fun consumeMpvError(session: DoviMpvSession): DoviStatus {
 		lastConsumedMpvSession = session
 		return consumedMpvStatus
+	}
+
+	override fun getMpvTransformObservation(session: DoviMpvSession): DoviTransformObservation? {
+		lastObservedMpvSession = session
+		return mpvTransformObservation
 	}
 }
 

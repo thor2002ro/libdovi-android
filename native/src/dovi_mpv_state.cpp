@@ -16,6 +16,9 @@ struct MpvState {
 	bool active = false;
 	dovi_transform_request request{};
 	dovi_status error = DOVI_OK;
+	bool transform_observed = false;
+	uint32_t input_presentation = DOVI_PRESENTATION_UNKNOWN;
+	uint32_t output_presentation = DOVI_PRESENTATION_UNKNOWN;
 };
 
 std::mutex mpv_mutex;
@@ -36,6 +39,11 @@ dovi_status validate_request(const dovi_transform_request* request) {
 		return DOVI_INVALID_ARGUMENT;
 	}
 	return DOVI_OK;
+}
+
+bool valid_presentation(uint32_t presentation) {
+	return presentation >= DOVI_PRESENTATION_PROFILE_5 &&
+		presentation <= DOVI_PRESENTATION_HLG;
 }
 
 } // namespace
@@ -77,6 +85,9 @@ dovi_status dovi_set_mpv_request_v3(
 	mpv_state.active = request != nullptr;
 	mpv_state.request = request != nullptr ? *request : dovi_transform_request{};
 	mpv_state.error = DOVI_OK;
+	mpv_state.transform_observed = false;
+	mpv_state.input_presentation = DOVI_PRESENTATION_UNKNOWN;
+	mpv_state.output_presentation = DOVI_PRESENTATION_UNKNOWN;
 	*generation = mpv_state.generation;
 	return DOVI_OK;
 }
@@ -115,6 +126,32 @@ dovi_status dovi_consume_mpv_error_v3(uint64_t generation) {
 	const auto status = mpv_state.error;
 	mpv_state.error = DOVI_OK;
 	return status;
+}
+
+void dovi_record_mpv_transform_v3(
+	uint64_t generation,
+	uint32_t input_presentation,
+	uint32_t output_presentation
+) {
+	if (!valid_presentation(input_presentation) || !valid_presentation(output_presentation)) return;
+	std::lock_guard<std::mutex> lock(mpv_mutex);
+	if (generation != mpv_state.generation || !mpv_state.active || mpv_state.transform_observed) return;
+	mpv_state.transform_observed = true;
+	mpv_state.input_presentation = input_presentation;
+	mpv_state.output_presentation = output_presentation;
+}
+
+uint32_t dovi_get_mpv_transform_info_v3(
+	uint64_t generation,
+	dovi_transform_info* info
+) {
+	if (info == nullptr) return 0;
+	std::lock_guard<std::mutex> lock(mpv_mutex);
+	*info = {};
+	if (generation != mpv_state.generation || !mpv_state.active || !mpv_state.transform_observed) return 0;
+	info->input_presentation = mpv_state.input_presentation;
+	info->output_presentation = mpv_state.output_presentation;
+	return 1;
 }
 
 } // extern "C"

@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #define DOVI_ABI_VERSION 3u
+#define DOVI_OUTPUT_PADDING_SIZE 64u
 
 typedef int32_t dovi_status;
 
@@ -87,6 +88,7 @@ typedef enum dovi_capability_flags {
 	DOVI_CAP_REPAIR_REMOVE_CMV40 = 1ull << 11,
 	DOVI_CAP_AV1_T35 = 1ull << 12,
 	DOVI_CAP_MPV_STATE = 1ull << 13,
+	DOVI_CAP_MPV_TRANSFORM_OBSERVATION = 1ull << 14,
 } dovi_capability_flags;
 
 typedef enum dovi_inspection_flags {
@@ -133,8 +135,17 @@ typedef struct dovi_transform_info {
 	uint32_t converted_rpu_count;
 	uint32_t dropped_dovi_nal_count;
 	uint32_t preserved_nal_count;
-	uint32_t reserved[3];
+	/* Exact presentation parsed from the input sample before transformation. */
+	uint32_t input_presentation;
+	uint32_t reserved[2];
 } dovi_transform_info;
+
+typedef struct dovi_owned_buffer {
+	uint8_t* data;
+	uint64_t size;
+} dovi_owned_buffer;
+
+/* Owned transform output includes DOVI_OUTPUT_PADDING_SIZE zero bytes after size. */
 
 DOVI_EXPORT uint32_t dovi_abi_version(void);
 DOVI_EXPORT uint64_t dovi_capabilities(void);
@@ -151,6 +162,15 @@ DOVI_EXPORT dovi_status dovi_transform_sample(
 	uint64_t* output_size,
 	dovi_transform_info* info
 );
+
+DOVI_EXPORT dovi_status dovi_transform_sample_alloc(
+	const dovi_sample* sample,
+	const dovi_transform_request* request,
+	dovi_owned_buffer* output,
+	dovi_transform_info* info
+);
+
+DOVI_EXPORT void dovi_owned_buffer_free(dovi_owned_buffer* buffer);
 
 /*
  * output and output_size are caller-owned. On DOVI_OUTPUT_TOO_SMALL,
@@ -191,6 +211,15 @@ DOVI_EXPORT uint32_t dovi_get_mpv_request_v3(
 DOVI_EXPORT void dovi_reset_mpv_error_v3(uint64_t generation);
 DOVI_EXPORT void dovi_record_mpv_error_v3(uint64_t generation, dovi_status status);
 DOVI_EXPORT dovi_status dovi_consume_mpv_error_v3(uint64_t generation);
+DOVI_EXPORT void dovi_record_mpv_transform_v3(
+	uint64_t generation,
+	uint32_t input_presentation,
+	uint32_t output_presentation
+);
+DOVI_EXPORT uint32_t dovi_get_mpv_transform_info_v3(
+	uint64_t generation,
+	dovi_transform_info* info
+);
 
 #ifdef __cplusplus
 }

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <malloc.h>
 #include <new>
 #include <string>
 #include <utility>
@@ -101,6 +102,7 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	if (output != expected_p81 || info.output_presentation != DOVI_PRESENTATION_PROFILE_8_1 ||
+		info.input_presentation != inspection.input_presentation ||
 		info.converted_rpu_count != 1) {
 		std::cerr << "fixture differs from official P8.1 output\n";
 		return 1;
@@ -192,6 +194,27 @@ int main(int argc, char** argv) {
 }
 
 #else
+
+namespace {
+
+size_t allocation_count = 0;
+bool count_allocations = false;
+
+} // namespace
+
+void* operator new(size_t size) {
+	if (count_allocations) allocation_count++;
+	if (void* memory = std::malloc(size)) return memory;
+	throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept {
+	std::free(memory);
+}
+
+void operator delete(void* memory, size_t) noexcept {
+	std::free(memory);
+}
 
 namespace {
 
@@ -303,20 +326,16 @@ struct TransformResult {
 
 TransformResult transform(
 	const dovi_sample& sample,
-	const dovi_transform_request& request,
-	uint64_t initial_capacity = 0
+	const dovi_transform_request& request
 ) {
 	TransformResult result{};
-	uint64_t required = initial_capacity;
-	if (initial_capacity == 0) {
-		result.status = dovi_transform_sample(&sample, &request, nullptr, &required, &result.info);
-		if (result.status != DOVI_OUTPUT_TOO_SMALL) return result;
+	dovi_owned_buffer output{};
+	result.status = dovi_transform_sample_alloc(
+		&sample, &request, &output, &result.info);
+	if (result.status == DOVI_OK) {
+		result.bytes.assign(output.data, output.data + output.size);
 	}
-	result.bytes.assign(static_cast<size_t>(required), 0xa5);
-	uint64_t size = required;
-	result.status = dovi_transform_sample(
-		&sample, &request, result.bytes.data(), &size, &result.info);
-	result.bytes.resize(static_cast<size_t>(size));
+	dovi_owned_buffer_free(&output);
 	return result;
 }
 
@@ -381,9 +400,49 @@ void test_lossless_rewrite_preserves_non_rpu_units() {
 	const auto result = transform(sample, request);
 	EXPECT_EQ(result.status, DOVI_OK);
 	EXPECT_EQ(result.bytes, bytes);
+	EXPECT_EQ(result.info.input_presentation, DOVI_PRESENTATION_PROFILE_7_FEL);
 	EXPECT_EQ(result.info.output_presentation, DOVI_PRESENTATION_PROFILE_7_FEL);
 	EXPECT_EQ(result.info.dropped_dovi_nal_count, 0u);
 	EXPECT_TRUE(observed_conversion_modes.empty());
+}
+
+void test_owned_transform_converts_once_and_releases_output() {
+	const auto base = nal(1, 0, {0x50});
+	const auto enhancement = nal(1, 1, {0x30});
+	const auto bytes = annex_b({rpu(7, 2), enhancement, base});
+	const auto sample = sample_of(bytes, DOVI_FRAMING_ANNEX_B);
+	const auto request = request_of(DOVI_TARGET_PROFILE_8_1);
+	dovi_owned_buffer output{};
+	dovi_transform_info info{};
+	observed_conversion_modes.clear();
+
+	EXPECT_EQ(
+		dovi_transform_sample_alloc(&sample, &request, &output, &info),
+		DOVI_OK);
+	EXPECT_EQ(observed_conversion_modes, std::vector<uint8_t>{2});
+	EXPECT_EQ(info.input_presentation, DOVI_PRESENTATION_PROFILE_7_FEL);
+	EXPECT_EQ(info.output_presentation, DOVI_PRESENTATION_PROFILE_8_1);
+	EXPECT_EQ(info.dropped_dovi_nal_count, 1u);
+	auto expected = std::vector<uint8_t>{0, 0, 0, 1};
+	const auto converted_rpu = rpu(8, 2);
+	expected.insert(expected.end(), converted_rpu.begin(), converted_rpu.end());
+	expected.insert(expected.end(), {0, 0, 0, 1});
+	expected.insert(expected.end(), base.begin(), base.end());
+	EXPECT_EQ(
+		std::vector<uint8_t>(output.data, output.data + output.size),
+		expected);
+	constexpr size_t required_padding = DOVI_OUTPUT_PADDING_SIZE;
+	const auto allocation_size = malloc_usable_size(output.data);
+	EXPECT_TRUE(allocation_size >= output.size + required_padding);
+	if (allocation_size >= output.size + required_padding) {
+		for (size_t index = 0; index < required_padding; index++) {
+			EXPECT_EQ(output.data[output.size + index], 0u);
+		}
+	}
+
+	dovi_owned_buffer_free(&output);
+	EXPECT_EQ(output.data, nullptr);
+	EXPECT_EQ(output.size, 0u);
 }
 
 void test_mel_and_profile81_targets_cover_supported_profiles() {
@@ -426,7 +485,7 @@ void test_mel_and_profile81_targets_cover_supported_profiles() {
 	const auto preserved_rpu = nal(62, 0, {8, 3});
 	const auto preserved_vcl = nal(1, 0, {0x50});
 	preserved_expected.insert(preserved_expected.end(), preserved_rpu.begin(), preserved_rpu.end());
-	preserved_expected.insert(preserved_expected.end(), {0, 0, 0, 1});
+	preserved_expected.insert(preserved_expected.end(), {0, 0, 1});
 	preserved_expected.insert(preserved_expected.end(), preserved_vcl.begin(), preserved_vcl.end());
 	EXPECT_EQ(preserved.bytes, preserved_expected);
 	EXPECT_TRUE(observed_conversion_modes.empty());
@@ -486,6 +545,36 @@ void test_source_base_drops_only_dolby_vision_data_and_preserves_hdr10_plus() {
 	expected.insert(expected.end(), vcl.begin(), vcl.end());
 	EXPECT_EQ(result.bytes, expected);
 	EXPECT_EQ(result.info.dropped_dovi_nal_count, 4u);
+}
+
+size_t source_base_transform_allocations(size_t video_nal_count) {
+	std::vector<std::vector<uint8_t>> units;
+	units.reserve(video_nal_count + 1);
+	units.push_back(rpu(7));
+	for (size_t index = 0; index < video_nal_count; index++) {
+		units.push_back(nal(1, 0, {0x50}));
+	}
+	const auto bytes = annex_b(units);
+	const auto sample = sample_of(bytes, DOVI_FRAMING_ANNEX_B);
+	const auto request = request_of(DOVI_TARGET_SOURCE_BASE_PRESENTATION);
+	std::vector<uint8_t> output(bytes.size());
+	uint64_t output_size = output.size();
+	dovi_transform_info info{};
+
+	allocation_count = 0;
+	count_allocations = true;
+	const auto status = dovi_transform_sample(
+		&sample, &request, output.data(), &output_size, &info);
+	count_allocations = false;
+	EXPECT_EQ(status, DOVI_OK);
+	return allocation_count;
+}
+
+void test_preserved_nals_do_not_add_heap_allocations_per_nal() {
+	const auto small = source_base_transform_allocations(1);
+	const auto large = source_base_transform_allocations(128);
+
+	EXPECT_TRUE(large <= small + 16);
 }
 
 void test_repairs_apply_independently_and_reject_conflicts() {
@@ -580,7 +669,7 @@ void test_av1_t35_supports_payload_complete_and_capacity_queries() {
 }
 
 void test_failures_never_publish_partial_output() {
-	for (const auto entry : std::vector<std::pair<uint8_t, dovi_status>>{
+	for (const auto& entry : std::vector<std::pair<uint8_t, dovi_status>>{
 		{0xee, DOVI_RPU_PARSE_FAILED},
 		{0xfd, DOVI_RPU_CONVERT_FAILED},
 		{0xfc, DOVI_RPU_WRITE_FAILED},
@@ -667,6 +756,22 @@ void test_mpv_request_and_error_state_is_typed_and_consumable() {
 	EXPECT_EQ(stored_generation, first_generation);
 	EXPECT_EQ(stored.target, request.target);
 	EXPECT_EQ(stored.repair_flags, request.repair_flags);
+	dovi_transform_info observed{};
+	EXPECT_EQ(dovi_get_mpv_transform_info_v3(first_generation, &observed), 0u);
+	dovi_record_mpv_transform_v3(
+		first_generation,
+		DOVI_PRESENTATION_PROFILE_7_FEL,
+		DOVI_PRESENTATION_PROFILE_8_1);
+	EXPECT_EQ(dovi_get_mpv_transform_info_v3(first_generation, &observed), 1u);
+	EXPECT_EQ(observed.input_presentation, DOVI_PRESENTATION_PROFILE_7_FEL);
+	EXPECT_EQ(observed.output_presentation, DOVI_PRESENTATION_PROFILE_8_1);
+	dovi_record_mpv_transform_v3(
+		first_generation,
+		DOVI_PRESENTATION_PROFILE_7_MEL,
+		DOVI_PRESENTATION_PROFILE_8_4);
+	EXPECT_EQ(dovi_get_mpv_transform_info_v3(first_generation, &observed), 1u);
+	EXPECT_EQ(observed.input_presentation, DOVI_PRESENTATION_PROFILE_7_FEL);
+	EXPECT_EQ(observed.output_presentation, DOVI_PRESENTATION_PROFILE_8_1);
 	const auto invalid = request_of(
 		DOVI_TARGET_LOSSLESS_REWRITE,
 		DOVI_REPAIR_ADD_CMV40_SAFE_DEFAULTS | DOVI_REPAIR_REMOVE_CMV40);
@@ -685,6 +790,12 @@ void test_mpv_request_and_error_state_is_typed_and_consumable() {
 	uint64_t second_generation = 0;
 	EXPECT_EQ(dovi_set_mpv_request_v3(&request, &second_generation), DOVI_OK);
 	EXPECT_TRUE(second_generation > first_generation);
+	EXPECT_EQ(dovi_get_mpv_transform_info_v3(second_generation, &observed), 0u);
+	dovi_record_mpv_transform_v3(
+		first_generation,
+		DOVI_PRESENTATION_PROFILE_7_MEL,
+		DOVI_PRESENTATION_PROFILE_8_1);
+	EXPECT_EQ(dovi_get_mpv_transform_info_v3(second_generation, &observed), 0u);
 	dovi_reset_mpv_error_v3(second_generation);
 	dovi_record_mpv_error_v3(first_generation, DOVI_INTERNAL_ERROR);
 	EXPECT_EQ(dovi_consume_mpv_error_v3(second_generation), DOVI_OK);
@@ -846,9 +957,11 @@ int main() {
 	test_inspection_supports_all_framings_and_supplemental_rpu();
 	test_inspection_rejects_malformed_and_inconsistent_rpus();
 	test_lossless_rewrite_preserves_non_rpu_units();
+	test_owned_transform_converts_once_and_releases_output();
 	test_mel_and_profile81_targets_cover_supported_profiles();
 	test_profile84_requires_an_hlg_encoded_base();
 	test_source_base_drops_only_dolby_vision_data_and_preserves_hdr10_plus();
+	test_preserved_nals_do_not_add_heap_allocations_per_nal();
 	test_repairs_apply_independently_and_reject_conflicts();
 	test_supplemental_rpu_is_inserted_before_the_first_vcl();
 	test_capacity_negotiation_is_atomic();

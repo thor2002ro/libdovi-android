@@ -10,7 +10,7 @@ build_script="$repository_root/scripts/build-native.sh"
 normalized_signature() {
     local symbol="$1"
     awk -v symbol="$symbol" '
-        index($0, symbol) { capture = 1 }
+        index($0, symbol "(") { capture = 1 }
         capture { printf "%s", $0 }
         capture && /\) \{/ { exit }
     ' "$jni_source" | tr -d '[:space:]'
@@ -34,11 +34,14 @@ assert_signature \
     'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeCapabilities' \
     'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeCapabilities(JNIEnv*,jobject){'
 assert_signature \
-    'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeInspectSample' \
-    'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeInspectSample(JNIEnv*env,jobject,jbyteArrayinput_array,jintframing,jintnal_length_size,jintsource_base_presentation,jbyteArraysupplemental_array,jintArrayinfo_array){'
+	'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeInspectSample' \
+	'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeInspectSample(JNIEnv*env,jobject,jbyteArrayinput_array,jintinput_offset,jintinput_size,jintframing,jintnal_length_size,jintsource_base_presentation,jbyteArraysupplemental_array,jintsupplemental_offset,jintsupplemental_size,jintArrayinfo_array){'
 assert_signature \
-    'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample' \
-    'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample(JNIEnv*env,jobject,jbyteArrayinput_array,jintframing,jintnal_length_size,jintsource_base_presentation,jbyteArraysupplemental_array,jinttarget,jintrepair_flags,jbyteArrayoutput_array,jlongArrayoutput_size_array,jintArrayinfo_array){'
+	'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample' \
+	'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample(JNIEnv*env,jobject,jbyteArrayinput_array,jintinput_offset,jintinput_size,jintframing,jintnal_length_size,jintsource_base_presentation,jbyteArraysupplemental_array,jintsupplemental_offset,jintsupplemental_size,jinttarget,jintrepair_flags,jbyteArrayoutput_array,jlongArrayoutput_size_array,jintArrayinfo_array){'
+assert_signature \
+	'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSampleAllocated' \
+	'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSampleAllocated(JNIEnv*env,jobject,jbyteArrayinput_array,jintinput_offset,jintinput_size,jintframing,jintnal_length_size,jintsource_base_presentation,jbyteArraysupplemental_array,jintsupplemental_offset,jintsupplemental_size,jinttarget,jintrepair_flags,jintArraystatus_array,jintArrayinfo_array){'
 assert_signature \
     'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeWriteAv1T35' \
     'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeWriteAv1T35(JNIEnv*env,jobject,jbyteArrayrpu_array,jintrpu_format,jbooleancomplete_obu,jbyteArrayoutput_array,jlongArrayoutput_size_array){'
@@ -51,16 +54,19 @@ assert_signature \
 assert_signature \
     'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeConsumeMpvError' \
     'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeConsumeMpvError(JNIEnv*,jobject,jlonggeneration){'
+assert_signature \
+    'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeGetMpvTransformObservation' \
+    'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeGetMpvTransformObservation(JNIEnv*env,jobject,jlonggeneration,jintArrayinfo_array){'
 
-transform_start="$(grep -n 'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample' "$jni_source" | cut -d: -f1)"
-transform_end="$(awk -v start="$transform_start" 'NR > start && /^JNIEXPORT jint JNICALL/ { print NR; exit }' "$jni_source")"
+transform_start="$(grep -nF 'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample(' "$jni_source" | cut -d: -f1)"
+transform_end="$(awk -v start="$transform_start" 'NR > start && /^JNIEXPORT / { print NR; exit }' "$jni_source")"
 transform_end="${transform_end:-999999}"
 
 long_validation="$(awk -v start="$transform_start" -v end="$transform_end" \
     'NR > start && NR < end && /valid_long_destination\(env, output_size_array, 1\)/ { print NR; exit }' \
     "$jni_source")"
 info_validation="$(awk -v start="$transform_start" -v end="$transform_end" \
-    'NR > start && NR < end && /valid_int_destination\(env, info_array, 5\)/ { print NR; exit }' \
+	'NR > start && NR < end && /valid_int_destination\(env, info_array, 6\)/ { print NR; exit }' \
     "$jni_source")"
 core_call="$(awk -v start="$transform_start" -v end="$transform_end" \
     'NR > start && NR < end && /dovi_transform_sample\(/ { print NR; exit }' \
@@ -95,8 +101,8 @@ av1_validation="$(awk -v start="$av1_start" -v end="$av1_call" \
     "$jni_source")"
 test -n "$av1_validation"
 
-grep -q '^typedef int32_t dovi_status;$' "$public_header"
-grep -q '^#define DOVI_ABI_VERSION 3u$' "$public_header"
+grep -q '^typedef int32_t dovi_status;' "$public_header"
+grep -q '^#define DOVI_ABI_VERSION 3u' "$public_header"
 grep -q 'dovi_record_mpv_error_v3(uint64_t generation, dovi_status status)' "$public_header"
 grep -q 'dovi_get_mpv_request(dovi_transform_request\* request)' "$public_header"
 grep -q 'Java_io_github_thor2002ro_libdovi_DoviBridge_nativeTransformSample' "$jni_source"

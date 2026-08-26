@@ -2,8 +2,8 @@
 
 #include "libdovi_capi.h"
 
-#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -32,7 +32,8 @@ constexpr uint64_t kCapabilities =
 	DOVI_CAP_REPAIR_ADD_CMV40_SAFE_DEFAULTS |
 	DOVI_CAP_REPAIR_REMOVE_CMV40 |
 	DOVI_CAP_AV1_T35 |
-	DOVI_CAP_MPV_STATE;
+	DOVI_CAP_MPV_STATE |
+	DOVI_CAP_MPV_TRANSFORM_OBSERVATION;
 
 static_assert(DOVI_TARGET_MEL == 1);
 static_assert(DOVI_TARGET_PROFILE_8_1 == 2);
@@ -40,8 +41,10 @@ static_assert(DOVI_TARGET_PROFILE_8_4 == 4);
 static_assert(sizeof(uint64_t) == 8);
 
 struct NalUnit {
-	std::vector<uint8_t> prefix;
-	std::vector<uint8_t> bytes;
+	const uint8_t* prefix;
+	size_t prefix_size;
+	const uint8_t* bytes;
+	size_t bytes_size;
 };
 
 struct ParsedSample {
@@ -161,8 +164,10 @@ dovi_status parse_annex_b(const uint8_t* data, size_t size, std::vector<NalUnit>
 			return DOVI_MALFORMED_SAMPLE;
 		}
 		units->push_back({
-			std::vector<uint8_t>(data + position, data + nal_start),
-			std::vector<uint8_t>(data + nal_start, data + next_position),
+			data + position,
+			prefix_size,
+			data + nal_start,
+			next_position - nal_start,
 		});
 		position = next_position;
 	}
@@ -175,15 +180,6 @@ size_t read_length(const uint8_t* data, uint8_t length_size) {
 		length = (length << 8) | data[index];
 	}
 	return length;
-}
-
-std::vector<uint8_t> write_length(size_t length, uint8_t length_size) {
-	std::vector<uint8_t> bytes(length_size);
-	for (uint8_t index = 0; index < length_size; index++) {
-		const auto shift = static_cast<unsigned>((length_size - index - 1) * 8);
-		bytes[index] = static_cast<uint8_t>((length >> shift) & 0xff);
-	}
-	return bytes;
 }
 
 dovi_status parse_length_prefixed(
@@ -201,8 +197,10 @@ dovi_status parse_length_prefixed(
 		const size_t nal_start = position + length_size;
 		if (nal_size < 2 || nal_size > size - nal_start) return DOVI_MALFORMED_SAMPLE;
 		units->push_back({
-			std::vector<uint8_t>(data + position, data + nal_start),
-			std::vector<uint8_t>(data + nal_start, data + nal_start + nal_size),
+			data + position,
+			length_size,
+			data + nal_start,
+			nal_size,
 		});
 		position = nal_start + nal_size;
 	}
@@ -239,15 +237,15 @@ dovi_status parse_sample(const dovi_sample& sample, ParsedSample* parsed) {
 	return DOVI_UNSUPPORTED_FRAMING;
 }
 
-uint8_t nal_type(const std::vector<uint8_t>& nal) {
-	return static_cast<uint8_t>((nal[0] >> 1) & 0x3f);
+uint8_t nal_type(const NalUnit& nal) {
+	return static_cast<uint8_t>((nal.bytes[0] >> 1) & 0x3f);
 }
 
-uint8_t nal_layer_id(const std::vector<uint8_t>& nal) {
-	return static_cast<uint8_t>(((nal[0] & 1) << 5) | (nal[1] >> 3));
+uint8_t nal_layer_id(const NalUnit& nal) {
+	return static_cast<uint8_t>(((nal.bytes[0] & 1) << 5) | (nal.bytes[1] >> 3));
 }
 
-bool is_enhancement_nal(const std::vector<uint8_t>& nal) {
+bool is_enhancement_nal(const NalUnit& nal) {
 	return nal_layer_id(nal) > 0 || nal_type(nal) == 63;
 }
 
@@ -334,12 +332,11 @@ dovi_status inspect_internal(const dovi_sample& sample, Inspection* inspection) 
 
 	bool seen_rpu = false;
 	for (const auto& unit : inspection->parsed.units) {
-		if (unit.bytes.size() < 2) return DOVI_MALFORMED_SAMPLE;
-		if (is_enhancement_nal(unit.bytes)) inspection->info.enhancement_nal_count++;
-		if (nal_type(unit.bytes) <= 31) inspection->info.video_nal_count++;
-		if (nal_type(unit.bytes) != 62) continue;
+		if (is_enhancement_nal(unit)) inspection->info.enhancement_nal_count++;
+		if (nal_type(unit) <= 31) inspection->info.video_nal_count++;
+		if (nal_type(unit) != 62) continue;
 
-		RpuPtr rpu = parse_rpu(unit.bytes.data(), unit.bytes.size(), false);
+		RpuPtr rpu = parse_rpu(unit.bytes, unit.bytes_size, false);
 		RpuDetails details;
 		status = inspect_rpu(rpu.get(), &details);
 		if (status != DOVI_OK) return status;
@@ -503,19 +500,40 @@ bool length_fits(size_t length, uint8_t length_size) {
 
 dovi_status append_unit(
 	std::vector<uint8_t>* output,
-	const NalUnit& unit,
+	const uint8_t* prefix,
+	size_t prefix_size,
+	const uint8_t* bytes,
+	size_t bytes_size,
 	dovi_framing framing,
 	uint8_t length_size
 ) {
 	if (framing == DOVI_FRAMING_ANNEX_B) {
-		output->insert(output->end(), unit.prefix.begin(), unit.prefix.end());
+		output->insert(output->end(), prefix, prefix + prefix_size);
 	} else {
-		if (!length_fits(unit.bytes.size(), length_size)) return DOVI_INTERNAL_ERROR;
-		const auto prefix = write_length(unit.bytes.size(), length_size);
-		output->insert(output->end(), prefix.begin(), prefix.end());
+		if (!length_fits(bytes_size, length_size)) return DOVI_INTERNAL_ERROR;
+		for (uint8_t index = 0; index < length_size; index++) {
+			const auto shift = static_cast<unsigned>((length_size - index - 1) * 8);
+			output->push_back(static_cast<uint8_t>((bytes_size >> shift) & 0xff));
+		}
 	}
-	output->insert(output->end(), unit.bytes.begin(), unit.bytes.end());
+	output->insert(output->end(), bytes, bytes + bytes_size);
 	return DOVI_OK;
+}
+
+dovi_status append_unit(
+	std::vector<uint8_t>* output,
+	const NalUnit& unit,
+	dovi_framing framing,
+	uint8_t length_size
+) {
+	return append_unit(
+		output,
+		unit.prefix,
+		unit.prefix_size,
+		unit.bytes,
+		unit.bytes_size,
+		framing,
+		length_size);
 }
 
 uint32_t output_presentation(
@@ -547,61 +565,82 @@ dovi_status build_transformed_sample(
 	std::vector<uint8_t>* output,
 	dovi_transform_info* info
 ) {
-	std::vector<NalUnit> retained;
-	retained.reserve(inspection.parsed.units.size() + (sample.supplemental_rpu_size > 0 ? 1 : 0));
 	const bool source_base = request.target == DOVI_TARGET_SOURCE_BASE_PRESENTATION;
 	const bool drops_enhancement_data =
 		request.target == DOVI_TARGET_MEL ||
 		request.target == DOVI_TARGET_PROFILE_8_1 ||
 		request.target == DOVI_TARGET_PROFILE_8_1_PRESERVE_MAPPING ||
 		request.target == DOVI_TARGET_PROFILE_8_4;
-
-	for (const auto& input_unit : inspection.parsed.units) {
-		const auto type = nal_type(input_unit.bytes);
-		if ((source_base && (type == 62 || is_enhancement_nal(input_unit.bytes))) ||
-			(drops_enhancement_data && is_enhancement_nal(input_unit.bytes))) {
-			info->dropped_dovi_nal_count++;
-			continue;
-		}
-
-		NalUnit unit = input_unit;
-		if (type == 62) {
-			auto status = transform_rpu_bytes(
-				unit.bytes.data(), unit.bytes.size(), false, request, &unit.bytes);
-			if (status != DOVI_OK) return status;
-			info->converted_rpu_count++;
-		} else {
-			info->preserved_nal_count++;
-		}
-		retained.push_back(std::move(unit));
-	}
-
+	std::vector<uint8_t> supplemental;
 	if (sample.supplemental_rpu_size > 0 && source_base) {
 		info->dropped_dovi_nal_count++;
 	} else if (sample.supplemental_rpu_size > 0) {
-		std::vector<uint8_t> converted;
 		auto status = transform_supplemental(
 			sample.supplemental_rpu,
 			static_cast<size_t>(sample.supplemental_rpu_size),
 			request,
-			&converted);
+			&supplemental);
 		if (status != DOVI_OK) return status;
-		auto insertion = std::find_if(retained.begin(), retained.end(), [](const NalUnit& unit) {
-			return nal_type(unit.bytes) <= 31;
-		});
-		std::vector<uint8_t> prefix;
-		if (inspection.parsed.framing == DOVI_FRAMING_ANNEX_B) {
-			prefix = insertion == retained.end()
-				? std::vector<uint8_t>{0, 0, 0, 1}
-				: insertion->prefix;
-		}
-		retained.insert(insertion, NalUnit{std::move(prefix), std::move(converted)});
 		info->converted_rpu_count++;
 	}
+	bool supplemental_written = supplemental.empty();
+	output->reserve(static_cast<size_t>(sample.data_size));
 
-	for (const auto& unit : retained) {
+	for (const auto& input_unit : inspection.parsed.units) {
+		const auto type = nal_type(input_unit);
+		if ((source_base && (type == 62 || is_enhancement_nal(input_unit))) ||
+			(drops_enhancement_data && is_enhancement_nal(input_unit))) {
+			info->dropped_dovi_nal_count++;
+			continue;
+		}
+
+		if (!supplemental_written && type <= 31) {
+			auto status = append_unit(
+				output,
+				input_unit.prefix,
+				input_unit.prefix_size,
+				supplemental.data(),
+				supplemental.size(),
+				inspection.parsed.framing,
+				inspection.parsed.nal_length_size);
+			if (status != DOVI_OK) return status;
+			supplemental_written = true;
+		}
+
+		if (type == 62) {
+			std::vector<uint8_t> converted;
+			auto status = transform_rpu_bytes(
+				input_unit.bytes, input_unit.bytes_size, false, request, &converted);
+			if (status != DOVI_OK) return status;
+			status = append_unit(
+				output,
+				input_unit.prefix,
+				input_unit.prefix_size,
+				converted.data(),
+				converted.size(),
+				inspection.parsed.framing,
+				inspection.parsed.nal_length_size);
+			if (status != DOVI_OK) return status;
+			info->converted_rpu_count++;
+		} else {
+			auto status = append_unit(
+				output, input_unit, inspection.parsed.framing, inspection.parsed.nal_length_size);
+			if (status != DOVI_OK) return status;
+			info->preserved_nal_count++;
+		}
+	}
+
+	if (!supplemental_written) {
+		constexpr uint8_t kAnnexBPrefix[]{0, 0, 0, 1};
+		const bool annex_b = inspection.parsed.framing == DOVI_FRAMING_ANNEX_B;
 		auto status = append_unit(
-			output, unit, inspection.parsed.framing, inspection.parsed.nal_length_size);
+			output,
+			annex_b ? kAnnexBPrefix : nullptr,
+			annex_b ? sizeof(kAnnexBPrefix) : 0,
+			supplemental.data(),
+			supplemental.size(),
+			inspection.parsed.framing,
+			inspection.parsed.nal_length_size);
 		if (status != DOVI_OK) return status;
 	}
 	return DOVI_OK;
@@ -620,6 +659,33 @@ dovi_status copy_output(
 	}
 	if (!bytes.empty()) std::memcpy(output, bytes.data(), bytes.size());
 	return DOVI_OK;
+}
+
+dovi_status transform_sample_internal(
+	const dovi_sample* sample,
+	const dovi_transform_request* request,
+	std::vector<uint8_t>* transformed,
+	dovi_transform_info* info
+) {
+	auto status = validate_sample(sample);
+	if (status != DOVI_OK) return status;
+	status = validate_request(request);
+	if (status != DOVI_OK) return status;
+
+	Inspection inspection;
+	status = inspect_internal(*sample, &inspection);
+	if (status != DOVI_OK) return status;
+	status = validate_target(*sample, *request, inspection.rpu);
+	if (status != DOVI_OK) return status;
+
+	dovi_transform_info result_info{};
+	result_info.input_presentation = inspection.info.input_presentation;
+	result_info.output_presentation = output_presentation(*sample, *request, inspection.rpu);
+	result_info.applied_repair_flags = request->repair_flags;
+	status = build_transformed_sample(
+		*sample, *request, inspection, transformed, &result_info);
+	if (status == DOVI_OK && info != nullptr) *info = result_info;
+	return status;
 }
 
 } // namespace
@@ -661,22 +727,9 @@ dovi_status dovi_transform_sample(
 	try {
 		if (output_size == nullptr) return DOVI_INVALID_ARGUMENT;
 		dovi_transform_info result_info{};
-		auto status = validate_sample(sample);
-		if (status != DOVI_OK) return status;
-		status = validate_request(request);
-		if (status != DOVI_OK) return status;
-
-		Inspection inspection;
-		status = inspect_internal(*sample, &inspection);
-		if (status != DOVI_OK) return status;
-		status = validate_target(*sample, *request, inspection.rpu);
-		if (status != DOVI_OK) return status;
-
-		result_info.output_presentation = output_presentation(*sample, *request, inspection.rpu);
-		result_info.applied_repair_flags = request->repair_flags;
 		std::vector<uint8_t> transformed;
-		status = build_transformed_sample(
-			*sample, *request, inspection, &transformed, &result_info);
+		auto status = transform_sample_internal(
+			sample, request, &transformed, &result_info);
 		if (status != DOVI_OK) return status;
 		const auto copy_status = copy_output(transformed, output, output_size);
 		if ((copy_status == DOVI_OK || copy_status == DOVI_OUTPUT_TOO_SMALL) && info != nullptr) {
@@ -686,6 +739,46 @@ dovi_status dovi_transform_sample(
 	} catch (...) {
 		return DOVI_INTERNAL_ERROR;
 	}
+}
+
+dovi_status dovi_transform_sample_alloc(
+	const dovi_sample* sample,
+	const dovi_transform_request* request,
+	dovi_owned_buffer* output,
+	dovi_transform_info* info
+) {
+	try {
+		if (output == nullptr || output->data != nullptr || output->size != 0) {
+			return DOVI_INVALID_ARGUMENT;
+		}
+		dovi_transform_info result_info{};
+		std::vector<uint8_t> transformed;
+		auto status = transform_sample_internal(
+			sample, request, &transformed, &result_info);
+		if (status != DOVI_OK) return status;
+		if (transformed.empty()) return DOVI_INTERNAL_ERROR;
+		if (transformed.size() >
+			std::numeric_limits<size_t>::max() - DOVI_OUTPUT_PADDING_SIZE) {
+			return DOVI_INTERNAL_ERROR;
+		}
+		auto* data = static_cast<uint8_t*>(
+			std::calloc(1, transformed.size() + DOVI_OUTPUT_PADDING_SIZE));
+		if (data == nullptr) return DOVI_INTERNAL_ERROR;
+		std::memcpy(data, transformed.data(), transformed.size());
+		output->data = data;
+		output->size = static_cast<uint64_t>(transformed.size());
+		if (info != nullptr) *info = result_info;
+		return DOVI_OK;
+	} catch (...) {
+		return DOVI_INTERNAL_ERROR;
+	}
+}
+
+void dovi_owned_buffer_free(dovi_owned_buffer* buffer) {
+	if (buffer == nullptr) return;
+	std::free(buffer->data);
+	buffer->data = nullptr;
+	buffer->size = 0;
 }
 
 dovi_status dovi_write_av1_t35(

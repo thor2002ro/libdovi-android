@@ -54,6 +54,7 @@ enum class DoviCapability {
 	REPAIR_REMOVE_CMV40,
 	AV1_T35,
 	MPV_STATE,
+	MPV_TRANSFORM_OBSERVATION,
 }
 
 /** A fixed-width status defined by the stable C ABI. */
@@ -87,9 +88,23 @@ data class DoviSample(
 	val nalLengthSize: Int = 0,
 	val sourceBasePresentation: DoviPresentation = DoviPresentation.UNKNOWN,
 	val supplementalRpu: ByteArray? = null,
+	val bytesOffset: Int = 0,
+	val bytesSize: Int = bytes.size - bytesOffset,
+	val supplementalRpuOffset: Int = 0,
+	val supplementalRpuSize: Int = supplementalRpu?.size?.minus(supplementalRpuOffset) ?: 0,
 ) {
 	init {
-		require(bytes.isNotEmpty()) { "Sample bytes must not be empty" }
+		require(bytesOffset >= 0 && bytesSize > 0 && bytesOffset <= bytes.size - bytesSize) {
+			"Sample byte range must be non-empty and within its backing array"
+		}
+		require(
+			supplementalRpuOffset >= 0 && supplementalRpuSize >= 0 &&
+				if (supplementalRpu == null) {
+					supplementalRpuOffset == 0 && supplementalRpuSize == 0
+				} else {
+					supplementalRpuOffset <= supplementalRpu.size - supplementalRpuSize
+				},
+		) { "Supplemental RPU byte range must be within its backing array" }
 		require(
 			sourceBasePresentation == DoviPresentation.UNKNOWN ||
 				sourceBasePresentation == DoviPresentation.HDR10 ||
@@ -173,6 +188,35 @@ data class DoviTransformResult(
 	val bytes: ByteArray,
 	val output: DoviPresentation,
 	val appliedRepairs: Set<DoviRepair>,
+	val input: DoviPresentation,
+)
+
+/** Caller-owned output storage for repeated transforms on one playback thread. */
+class DoviTransformBuffer {
+	internal var bytes = ByteArray(0)
+	internal val outputSize = LongArray(1)
+	internal val info = IntArray(6)
+
+	internal fun ensureCapacity(required: Int) {
+		if (required <= bytes.size) return
+		val capacity = (required.toLong() + required / 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+		bytes = bytes.copyOf(capacity)
+	}
+}
+
+/** A view into [DoviTransformBuffer] that remains valid until that buffer is used again. */
+data class DoviTransformBufferResult(
+	val bytes: ByteArray,
+	val bytesSize: Int,
+	val output: DoviPresentation,
+	val appliedRepairs: Set<DoviRepair>,
+	val input: DoviPresentation,
+)
+
+/** The first successful native transform observed for an active MPV request. */
+data class DoviTransformObservation(
+	val input: DoviPresentation,
+	val output: DoviPresentation,
 )
 
 /** A typed native failure. */

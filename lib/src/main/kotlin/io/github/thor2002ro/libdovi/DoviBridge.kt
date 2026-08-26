@@ -25,6 +25,18 @@ object DoviBridge {
 		api.transform(sample, request)
 
 	fun transform(
+		sample: DoviSample,
+		request: DoviTransformRequest,
+		buffer: DoviTransformBuffer,
+	): DoviTransformBufferResult = api.transform(sample, request, buffer)
+
+	fun openTransformSession(
+		request: DoviTransformRequest,
+		strategy: DoviTransformStrategy = DoviTransformStrategy.LIBDOVI,
+		state: DoviTransformSessionState = DoviTransformSessionState(),
+	): DoviTransformSession = api.openTransformSession(request, strategy, state)
+
+	fun transform(
 		bytes: ByteArray,
 		request: DoviTransformRequest,
 		framing: DoviFraming = DoviFraming.AUTO,
@@ -50,6 +62,9 @@ object DoviBridge {
 
 	fun consumeMpvError(session: DoviMpvSession): DoviStatus = api.consumeMpvError(session)
 
+	fun getMpvTransformObservation(session: DoviMpvSession): DoviTransformObservation? =
+		api.getMpvTransformObservation(session)
+
 		private object JniBackend : DoviBackend {
 		override fun initialize() {
 			System.loadLibrary(LIBRARY_NAME)
@@ -62,10 +77,14 @@ object DoviBridge {
 				operation = "inspect",
 				value = nativeInspectSample(
 					sample.bytes,
+					sample.bytesOffset,
+					sample.bytesSize,
 					framingToNative(sample.framing),
 					sample.nalLengthSize,
 					presentationToNative(sample.sourceBasePresentation),
 					sample.supplementalRpu,
+					sample.supplementalRpuOffset,
+					sample.supplementalRpuSize,
 					info,
 				),
 			)
@@ -86,26 +105,75 @@ object DoviBridge {
 			request: DoviTransformRequest,
 		): DoviTransformResult {
 			val info = IntArray(TRANSFORM_FIELD_COUNT)
-			val bytes = growOutput("transform", sample.bytes.size) { output, outputSize ->
-				nativeTransformSample(
-					sample.bytes,
-					framingToNative(sample.framing),
-					sample.nalLengthSize,
-					presentationToNative(sample.sourceBasePresentation),
-					sample.supplementalRpu,
-					targetToNative(request.target),
-					repairsToNative(request.repairs),
-					output,
-					outputSize,
-					info,
-				)
-			}
-			return DoviTransformResult(
-				bytes = bytes,
+			val status = IntArray(1)
+			val bytes = nativeTransformSampleAllocated(
+				sample.bytes,
+				sample.bytesOffset,
+				sample.bytesSize,
+				framingToNative(sample.framing),
+				sample.nalLengthSize,
+				presentationToNative(sample.sourceBasePresentation),
+				sample.supplementalRpu,
+				sample.supplementalRpuOffset,
+				sample.supplementalRpuSize,
+				targetToNative(request.target),
+				repairsToNative(request.repairs),
+				status,
+				info,
+			)
+			checkStatus("transform", status[0])
+			return exactTransformResult(
+				bytes = bytes ?: throw invalidNativeResult("transform", "native output was null"),
+				input = presentationFromNative(info[5], "transform"),
 				output = presentationFromNative(info[0], "transform"),
 				appliedRepairs = repairsFromNative(info[1])
 					?: throw invalidNativeResult("transform", "unknown applied repair flags ${info[1]}"),
 			)
+		}
+
+		override fun transform(
+			sample: DoviSample,
+			request: DoviTransformRequest,
+			buffer: DoviTransformBuffer,
+		): DoviTransformBufferResult {
+			var capacity = buffer.bytes.size.coerceAtLeast(sample.bytesSize)
+			repeat(MAX_OUTPUT_ATTEMPTS) {
+				buffer.ensureCapacity(capacity)
+				buffer.outputSize[0] = buffer.bytes.size.toLong()
+				when (val status = statusFromNative(
+					nativeTransformSample(
+						sample.bytes,
+						sample.bytesOffset,
+						sample.bytesSize,
+						framingToNative(sample.framing),
+						sample.nalLengthSize,
+						presentationToNative(sample.sourceBasePresentation),
+						sample.supplementalRpu,
+						sample.supplementalRpuOffset,
+						sample.supplementalRpuSize,
+						targetToNative(request.target),
+						repairsToNative(request.repairs),
+						buffer.bytes,
+						buffer.outputSize,
+						buffer.info,
+					),
+					"transform",
+				)) {
+					DoviStatus.OK -> return DoviTransformBufferResult(
+						bytes = buffer.bytes,
+						bytesSize = checkedOutputSize(buffer.outputSize[0], buffer.bytes.size, "transform"),
+						input = presentationFromNative(buffer.info[5], "transform"),
+						output = presentationFromNative(buffer.info[0], "transform"),
+						appliedRepairs = repairsFromNative(buffer.info[1])
+							?: throw invalidNativeResult("transform", "unknown applied repair flags ${buffer.info[1]}"),
+					)
+					DoviStatus.OUTPUT_TOO_SMALL -> {
+						capacity = checkedRequiredCapacity(buffer.outputSize[0], buffer.bytes.size, "transform")
+					}
+					else -> throw DoviException(status, "transform")
+				}
+			}
+			throw invalidNativeResult("transform", "output capacity did not converge")
 		}
 
 		override fun writeAv1T35(
@@ -145,6 +213,25 @@ object DoviBridge {
 				nativeConsumeMpvError(nativeGeneration(session, "consumeMpvError")),
 				"consumeMpvError",
 			)
+
+		override fun getMpvTransformObservation(session: DoviMpvSession): DoviTransformObservation? {
+			if (DoviCapability.MPV_TRANSFORM_OBSERVATION !in capabilities()) return null
+			val info = IntArray(2)
+			return when (val result = nativeGetMpvTransformObservation(
+				nativeGeneration(session, "getMpvTransformObservation"),
+				info,
+			)) {
+				0 -> null
+				1 -> DoviTransformObservation(
+					input = presentationFromNative(info[0], "getMpvTransformObservation"),
+					output = presentationFromNative(info[1], "getMpvTransformObservation"),
+				)
+				else -> throw invalidNativeResult(
+					"getMpvTransformObservation",
+					"invalid availability result $result",
+				)
+			}
+		}
 
 		private fun nativeGeneration(session: DoviMpvSession, operation: String): Long =
 			(session as? NativeDoviMpvSession)?.generation
@@ -304,6 +391,7 @@ object DoviBridge {
 				if (flags and (1L shl 11) != 0L) add(DoviCapability.REPAIR_REMOVE_CMV40)
 				if (flags and (1L shl 12) != 0L) add(DoviCapability.AV1_T35)
 				if (flags and (1L shl 13) != 0L) add(DoviCapability.MPV_STATE)
+				if (flags and (1L shl 14) != 0L) add(DoviCapability.MPV_TRANSFORM_OBSERVATION)
 			}
 		}
 
@@ -332,34 +420,57 @@ object DoviBridge {
 		private const val CLEAR_MPV_REQUEST = -1
 		private const val INSPECTION_FIELD_COUNT = 7
 		private const val KNOWN_INSPECTION_FLAGS = (1 shl 2) - 1
-		private const val TRANSFORM_FIELD_COUNT = 5
+		private const val TRANSFORM_FIELD_COUNT = 6
 		private const val MAX_OUTPUT_ATTEMPTS = 4
 		private const val KNOWN_REPAIR_FLAGS = (1 shl 4) - 1
-		private const val KNOWN_CAPABILITY_FLAGS = (1L shl 14) - 1L
+		private const val KNOWN_CAPABILITY_FLAGS = (1L shl 15) - 1L
 	}
 
 	private external fun nativeAbiVersion(): Int
 	private external fun nativeCapabilities(): Long
 	private external fun nativeInspectSample(
 		input: ByteArray,
+		inputOffset: Int,
+		inputSize: Int,
 		framing: Int,
 		nalLengthSize: Int,
 		sourceBasePresentation: Int,
 		supplementalRpu: ByteArray?,
+		supplementalRpuOffset: Int,
+		supplementalRpuSize: Int,
 		info: IntArray,
 	): Int
 	private external fun nativeTransformSample(
 		input: ByteArray,
+		inputOffset: Int,
+		inputSize: Int,
 		framing: Int,
 		nalLengthSize: Int,
 		sourceBasePresentation: Int,
 		supplementalRpu: ByteArray?,
+		supplementalRpuOffset: Int,
+		supplementalRpuSize: Int,
 		target: Int,
 		repairFlags: Int,
 		output: ByteArray,
 		outputSize: LongArray,
 		info: IntArray,
 	): Int
+	private external fun nativeTransformSampleAllocated(
+		input: ByteArray,
+		inputOffset: Int,
+		inputSize: Int,
+		framing: Int,
+		nalLengthSize: Int,
+		sourceBasePresentation: Int,
+		supplementalRpu: ByteArray?,
+		supplementalRpuOffset: Int,
+		supplementalRpuSize: Int,
+		target: Int,
+		repairFlags: Int,
+		status: IntArray,
+		info: IntArray,
+	): ByteArray?
 	private external fun nativeWriteAv1T35(
 		rpu: ByteArray,
 		rpuFormat: Int,
@@ -370,6 +481,17 @@ object DoviBridge {
 	private external fun nativeSetMpvRequest(target: Int, repairFlags: Int, generation: LongArray): Int
 	private external fun nativeResetMpvError(generation: Long)
 	private external fun nativeConsumeMpvError(generation: Long): Int
+	private external fun nativeGetMpvTransformObservation(generation: Long, info: IntArray): Int
+}
+
+internal fun exactTransformResult(
+	bytes: ByteArray,
+	input: DoviPresentation,
+	output: DoviPresentation,
+	appliedRepairs: Set<DoviRepair>,
+): DoviTransformResult {
+	require(bytes.isNotEmpty()) { "Transformed sample bytes must not be empty" }
+	return DoviTransformResult(bytes, output, appliedRepairs, input)
 }
 
 /** Semantic-only seam used by JVM tests without loading the Android JNI library. */
@@ -377,11 +499,28 @@ internal interface DoviBackend {
 	fun initialize()
 	fun inspect(sample: DoviSample): DoviInspection
 	fun transform(sample: DoviSample, request: DoviTransformRequest): DoviTransformResult
+	fun transform(
+		sample: DoviSample,
+		request: DoviTransformRequest,
+		buffer: DoviTransformBuffer,
+	): DoviTransformBufferResult {
+		val result = transform(sample, request)
+		buffer.ensureCapacity(result.bytes.size)
+		System.arraycopy(result.bytes, 0, buffer.bytes, 0, result.bytes.size)
+		return DoviTransformBufferResult(
+			buffer.bytes,
+			result.bytes.size,
+			result.output,
+			result.appliedRepairs,
+			result.input,
+		)
+	}
 	fun writeAv1T35(rpu: ByteArray, format: DoviRpuFormat, completeObu: Boolean): ByteArray
 	fun capabilities(): Set<DoviCapability>
 	fun setMpvRequest(request: DoviTransformRequest?): DoviMpvSession
 	fun resetMpvError(session: DoviMpvSession)
 	fun consumeMpvError(session: DoviMpvSession): DoviStatus
+	fun getMpvTransformObservation(session: DoviMpvSession): DoviTransformObservation?
 }
 
 internal class DoviApi(
@@ -399,6 +538,20 @@ internal class DoviApi(
 
 	fun transform(sample: DoviSample, request: DoviTransformRequest): DoviTransformResult =
 		available("transform") { backend.transform(sample, request) }
+
+	fun transform(
+		sample: DoviSample,
+		request: DoviTransformRequest,
+		buffer: DoviTransformBuffer,
+	): DoviTransformBufferResult = available("transform") { backend.transform(sample, request, buffer) }
+
+	fun openTransformSession(
+		request: DoviTransformRequest,
+		strategy: DoviTransformStrategy = DoviTransformStrategy.LIBDOVI,
+		state: DoviTransformSessionState = DoviTransformSessionState(),
+	): DoviTransformSession = DoviTransformSession(request, strategy, state) { sample, buffer ->
+		transform(sample, request, buffer)
+	}
 
 	fun writeAv1T35(rpu: ByteArray, format: DoviRpuFormat, completeObu: Boolean): ByteArray =
 		available("writeAv1T35") { backend.writeAv1T35(rpu, format, completeObu) }
@@ -418,6 +571,9 @@ internal class DoviApi(
 	fun consumeMpvError(session: DoviMpvSession): DoviStatus = available("consumeMpvError") {
 		backend.consumeMpvError(session)
 	}
+
+	fun getMpvTransformObservation(session: DoviMpvSession): DoviTransformObservation? =
+		available("getMpvTransformObservation") { backend.getMpvTransformObservation(session) }
 
 	private inline fun <T> available(operation: String, block: () -> T): T {
 		availability.exceptionOrNull()?.let { throw DoviUnavailableException(operation, it) }

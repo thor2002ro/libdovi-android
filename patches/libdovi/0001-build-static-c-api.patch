@@ -1,0 +1,8 @@
+diff --git a/dolby_vision/Cargo.toml b/dolby_vision/Cargo.toml
+index 88bacf5..85a315d 100644
+--- a/dolby_vision/Cargo.toml
++++ b/dolby_vision/Cargo.toml
+@@ -48,2 +48,3 @@ name = "dovi"
+ [lib]
++crate-type = ["staticlib"]
+ doctest = false

@@ -1,0 +1,36 @@
+diff --git a/dolby_vision/src/capi.rs b/dolby_vision/src/capi.rs
+index 619492a..857845e 100644
+--- a/dolby_vision/src/capi.rs
++++ b/dolby_vision/src/capi.rs
+@@ -216,2 +216,31 @@ pub unsafe extern "C" fn dovi_convert_rpu_with_mode(ptr: *mut RpuOpaque, mode: u
++/// Convert an RPU to profile 8.1 while preserving luma and chroma mapping.
++///
++/// # Safety
++///
++/// The pointer must have been returned by a dovi_parse_* function and not yet freed.
++/// Returns 0 if successful, -1 otherwise.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn dovi_convert_rpu_to_p81_preserve_mapping(
++    ptr: *mut RpuOpaque,
++) -> i32 {
++    if ptr.is_null() {
++        return -1;
++    }
++
++    let opaque = unsafe { &mut *ptr };
++
++    if let Some(rpu) = &mut opaque.rpu {
++        match rpu.convert_with_mode(ConversionMode::To81MappingPreserved) {
++            Ok(_) => 0,
++            Err(e) => {
++                opaque.error = Some(CString::new(e.to_string()).unwrap());
++                -1
++            }
++        }
++    } else {
++        -1
++    }
++}
++
+ /// # Safety
+ /// The pointer to the opaque struct must be valid.

@@ -1,0 +1,93 @@
+diff --git a/dolby_vision/src/capi.rs b/dolby_vision/src/capi.rs
+index 619492a..6a3e393 100644
+--- a/dolby_vision/src/capi.rs
++++ b/dolby_vision/src/capi.rs
+@@ -108,4 +108,87 @@ pub unsafe extern "C" fn dovi_rpu_get_error(ptr: *const RpuOpaque) -> *const c_
+     }
+ }
+-
++/// # Safety
++/// The pointer to the opaque struct must be valid.
++///
++/// Returns the parsed Dolby Vision profile, or -1 for a null or invalid RPU.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn dovi_rpu_get_profile(ptr: *const RpuOpaque) -> i32 {
++    if ptr.is_null() {
++        return -1;
++    }
++
++    let opaque = unsafe { &*ptr };
++
++    match &opaque.rpu {
++        Some(rpu) => i32::from(rpu.dovi_profile),
++        None => -1,
++    }
++}
++
++/// # Safety
++/// The pointer to the opaque struct must be valid.
++///
++/// Returns the parsed enhancement-layer type as a stable scalar:
++///     - 0: no enhancement layer
++///     - 1: MEL
++///     - 2: FEL
++///     - -1: null or invalid RPU
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn dovi_rpu_get_el_type(ptr: *const RpuOpaque) -> i32 {
++    if ptr.is_null() {
++        return -1;
++    }
++
++    let opaque = unsafe { &*ptr };
++
++    match &opaque.rpu {
++        Some(rpu) => match rpu.el_type.as_ref().map(|el_type| el_type.as_str()) {
++            None => 0,
++            Some("MEL") => 1,
++            Some("FEL") => 2,
++            Some(_) => -1,
++        },
++        None => -1,
++    }
++}
++
++/// # Safety
++/// The pointer to the opaque struct must be valid.
++///
++/// Returns 1 when the parsed RPU carries mapping data, 0 when it does not,
++/// or -1 for a null or invalid RPU.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn dovi_rpu_has_mapping(ptr: *const RpuOpaque) -> i32 {
++    if ptr.is_null() {
++        return -1;
++    }
++
++    let opaque = unsafe { &*ptr };
++    match &opaque.rpu {
++        Some(rpu) => rpu.rpu_data_mapping.is_some() as i32,
++        None => -1,
++    }
++}
++
++/// # Safety
++/// The pointer to the opaque struct must be valid.
++///
++/// Returns 1 when the parsed RPU carries CM v4.0 metadata, 0 when it does
++/// not, or -1 for a null or invalid RPU.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn dovi_rpu_has_cmv40_metadata(ptr: *const RpuOpaque) -> i32 {
++    if ptr.is_null() {
++        return -1;
++    }
++
++    let opaque = unsafe { &*ptr };
++    match &opaque.rpu {
++        Some(rpu) => rpu
++            .vdr_dm_data
++            .as_ref()
++            .is_some_and(|metadata| metadata.cmv40_metadata.is_some()) as i32,
++        None => -1,
++    }
++}
++
+ /// # Safety

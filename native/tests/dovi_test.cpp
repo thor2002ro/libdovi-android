@@ -232,6 +232,7 @@ struct FakeRpu {
 int failures = 0;
 std::vector<uint8_t> observed_conversion_modes;
 uint32_t preserve_mapping_calls = 0;
+uint32_t parse_calls = 0;
 
 #define EXPECT_TRUE(value) expect((value), #value, __LINE__)
 #define EXPECT_EQ(actual, expected) expect_equal((actual), (expected), #actual, #expected, __LINE__)
@@ -415,11 +416,13 @@ void test_owned_transform_converts_once_and_releases_output() {
 	dovi_owned_buffer output{};
 	dovi_transform_info info{};
 	observed_conversion_modes.clear();
+	parse_calls = 0;
 
 	EXPECT_EQ(
 		dovi_transform_sample_alloc(&sample, &request, &output, &info),
 		DOVI_OK);
 	EXPECT_EQ(observed_conversion_modes, std::vector<uint8_t>{2});
+	EXPECT_EQ(parse_calls, 1u);
 	EXPECT_EQ(info.input_presentation, DOVI_PRESENTATION_PROFILE_7_FEL);
 	EXPECT_EQ(info.output_presentation, DOVI_PRESENTATION_PROFILE_8_1);
 	EXPECT_EQ(info.dropped_dovi_nal_count, 1u);
@@ -825,6 +828,7 @@ extern "C" {
 struct DoviRpuOpaque {};
 
 DoviRpuOpaque* dovi_parse_unspec62_nalu(const uint8_t* data, size_t size) {
+	parse_calls++;
 	if (size >= 3 && data[2] == 0xfa) throw std::bad_alloc();
 	auto* fake = new FakeRpu;
 	fake->bytes.assign(data, data + size);

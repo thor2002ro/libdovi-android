@@ -1,5 +1,6 @@
 #include "dovi.h"
 
+#include <atomic>
 #include <limits>
 #include <mutex>
 
@@ -23,6 +24,7 @@ struct MpvState {
 
 std::mutex mpv_mutex;
 MpvState mpv_state;
+std::atomic<uint64_t> observed_generation{0};
 
 dovi_status validate_request(const dovi_transform_request* request) {
 	if (request->struct_size != sizeof(dovi_transform_request) ||
@@ -88,6 +90,7 @@ dovi_status dovi_set_mpv_request_v3(
 	mpv_state.transform_observed = false;
 	mpv_state.input_presentation = DOVI_PRESENTATION_UNKNOWN;
 	mpv_state.output_presentation = DOVI_PRESENTATION_UNKNOWN;
+	observed_generation.store(0, std::memory_order_release);
 	*generation = mpv_state.generation;
 	return DOVI_OK;
 }
@@ -134,11 +137,13 @@ void dovi_record_mpv_transform_v3(
 	uint32_t output_presentation
 ) {
 	if (!valid_presentation(input_presentation) || !valid_presentation(output_presentation)) return;
+	if (observed_generation.load(std::memory_order_acquire) == generation) return;
 	std::lock_guard<std::mutex> lock(mpv_mutex);
 	if (generation != mpv_state.generation || !mpv_state.active || mpv_state.transform_observed) return;
 	mpv_state.transform_observed = true;
 	mpv_state.input_presentation = input_presentation;
 	mpv_state.output_presentation = output_presentation;
+	observed_generation.store(generation, std::memory_order_release);
 }
 
 uint32_t dovi_get_mpv_transform_info_v3(

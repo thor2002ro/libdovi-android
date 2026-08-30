@@ -45,7 +45,9 @@ create_fixture() {
     make_executable "$fixture/fake-bin/curl" 'exit 0'
     make_executable "$fixture/fake-bin/rustup" \
         'if [[ "${1:-}" == target && "${2:-}" == list ]]; then' \
-        '  printf "%s (installed)\n" armv7-linux-androideabi aarch64-linux-android i686-linux-android x86_64-linux-android' \
+        '  printf "%s\n" armv7-linux-androideabi aarch64-linux-android i686-linux-android x86_64-linux-android' \
+        'elif [[ "${1:-}" == target && "${2:-}" == add ]]; then' \
+        '  echo "$3" >> "$RUSTUP_LOG"' \
         'fi'
     make_executable "$fixture/fake-bin/cargo" 'exit 0'
 
@@ -100,6 +102,7 @@ run_wrapper() {
     PATH="$fixture/fake-bin:$PATH" \
         ANDROID_SDK_ROOT="$fixture/android-sdk" \
         BUILD_LOG="$fixture/build.log" \
+        RUSTUP_LOG="$fixture/rustup.log" \
         "$fixture/dependencies/libdovi-android/rebuild-libdovi-wsl.sh" "$@"
 }
 
@@ -109,6 +112,8 @@ create_gradle_fixture "$successful_fixture"
 success_output="$(run_wrapper "$successful_fixture")"
 [[ "$(cat "$successful_fixture/build.log")" == $'native\ngradle' ]] || \
     fail "native compilation and Gradle publication did not run in order"
+[[ "$(cat "$successful_fixture/rustup.log")" == 'thumbv7neon-linux-androideabi' ]] || \
+    fail "wrapper did not install the ARMv7 NEON Rust target"
 [[ "$success_output" == *"Saved libdovi AAR, Maven repository, and native SDK"* ]] || \
     fail "success output did not identify the published artifacts"
 

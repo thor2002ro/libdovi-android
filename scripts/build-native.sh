@@ -58,9 +58,13 @@ for patch in "$patch_root"/*.patch; do
 done
 
 export CARGO_TARGET_DIR="$source_root/target"
+export CARGO_PROFILE_RELEASE_DEPLOY_OPT_LEVEL=3
+export CARGO_PROFILE_RELEASE_DEPLOY_LTO=thin
+export CARGO_PROFILE_RELEASE_DEPLOY_CODEGEN_UNITS=1
+export CARGO_PROFILE_RELEASE_DEPLOY_PANIC=abort
 for android_abi in armeabi-v7a arm64-v8a x86 x86_64; do
     case "$android_abi" in
-        armeabi-v7a) rust_target=armv7-linux-androideabi ; ndk_target=armv7a-linux-androideabi ;;
+        armeabi-v7a) rust_target=thumbv7neon-linux-androideabi ; ndk_target=armv7a-linux-androideabi ;;
         arm64-v8a) rust_target=aarch64-linux-android ; ndk_target=aarch64-linux-android ;;
         x86) rust_target=i686-linux-android ; ndk_target=i686-linux-android ;;
         x86_64) rust_target=x86_64-linux-android ; ndk_target=x86_64-linux-android ;;
@@ -84,11 +88,11 @@ for android_abi in armeabi-v7a arm64-v8a x86 x86_64; do
     cargo build \
         --manifest-path "$dovi_tool/dolby_vision/Cargo.toml" \
         --locked \
-        --release \
+        --profile release-deploy \
         --features capi \
         --target "$rust_target"
 
-    static_library="$CARGO_TARGET_DIR/$rust_target/release/libdolby_vision.a"
+    static_library="$CARGO_TARGET_DIR/$rust_target/release-deploy/libdolby_vision.a"
     if [ ! -f "$static_library" ]; then
         echo "Expected static libdovi archive not found: $static_library" >&2
         exit 1
@@ -96,8 +100,16 @@ for android_abi in armeabi-v7a arm64-v8a x86 x86_64; do
 
     native_root="$output_root/$android_abi"
     mkdir -p "$native_root/include" "$native_root/lib/pkgconfig"
+    native_compile_flags=(-O3 -flto=thin)
+    if [ "$android_abi" = armeabi-v7a ]; then
+        native_compile_flags+=("-mfpu=neon")
+        native_compile_flags+=("-mthumb")
+    fi
     "$clangxx" \
         -std=c++17 \
+        "${native_compile_flags[@]}" \
+        -ffunction-sections \
+        -fdata-sections \
         -fPIC \
         -fvisibility=hidden \
         -static-libstdc++ \
@@ -108,7 +120,9 @@ for android_abi in armeabi-v7a arm64-v8a x86 x86_64; do
         "$native_source_root/src/dovi_mpv_state.cpp" \
         -shared \
         -Wl,-soname,libjellyfin_dovi.so \
-        -Wl,--whole-archive "$static_library" -Wl,--no-whole-archive \
+        "$static_library" \
+        -Wl,--gc-sections \
+        -Wl,--icf=safe \
         -Wl,--exclude-libs,ALL \
         -llog -ldl -lm -latomic \
         -o "$native_root/libjellyfin_dovi.so"

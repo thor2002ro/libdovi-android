@@ -119,7 +119,7 @@ install_rust() {
     installed_targets="$(rustup target list --installed)"
     local target
     for target in \
-        armv7-linux-androideabi \
+        thumbv7neon-linux-androideabi \
         aarch64-linux-android \
         i686-linux-android \
         x86_64-linux-android; do

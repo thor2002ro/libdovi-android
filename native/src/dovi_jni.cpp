@@ -3,18 +3,32 @@
 #if defined(__ANDROID__)
 
 #include <jni.h>
+#include <android/log.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 
 namespace {
 
+std::atomic<bool> byte_array_copy_observed{false};
+
 class ByteArrayAccess {
 public:
 	ByteArrayAccess(JNIEnv* env, jbyteArray array, bool writable = false)
 		: env_(env), array_(array), writable_(writable) {
-		if (array_ != nullptr) bytes_ = env_->GetByteArrayElements(array_, nullptr);
+		if (array_ != nullptr) {
+			jboolean is_copy = JNI_FALSE;
+			bytes_ = env_->GetByteArrayElements(array_, &is_copy);
+			if (is_copy == JNI_TRUE &&
+				!byte_array_copy_observed.load(std::memory_order_relaxed) &&
+				!byte_array_copy_observed.exchange(true, std::memory_order_relaxed)) {
+				__android_log_print(
+					ANDROID_LOG_INFO, "JellyfinDovi",
+					"JNI byte-array access required a VM copy");
+			}
+		}
 	}
 
 	~ByteArrayAccess() {

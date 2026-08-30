@@ -110,6 +110,32 @@ grep -q 'int32_t dovi_rpu_get_profile' "$capi_header"
 grep -q 'int32_t dovi_rpu_get_el_type' "$capi_header"
 grep -q 'int32_t dovi_rpu_has_mapping' "$capi_header"
 grep -q 'int32_t dovi_rpu_has_cmv40_metadata' "$capi_header"
+grep -q 'armeabi-v7a) rust_target=thumbv7neon-linux-androideabi' "$build_script"
+grep -q 'native_compile_flags=(-O3 -flto=thin)' "$build_script"
+grep -q -- '--profile release-deploy' "$build_script"
+grep -q 'CARGO_PROFILE_RELEASE_DEPLOY_PANIC=abort' "$build_script"
+grep -q 'CARGO_PROFILE_RELEASE_DEPLOY_OPT_LEVEL=3' "$build_script"
+grep -q 'CARGO_PROFILE_RELEASE_DEPLOY_LTO=thin' "$build_script"
+grep -q 'CARGO_PROFILE_RELEASE_DEPLOY_CODEGEN_UNITS=1' "$build_script"
+grep -q 'native_compile_flags+=("-mfpu=neon")' "$build_script"
+grep -q 'native_compile_flags+=("-mthumb")' "$build_script"
+grep -q -- '-ffunction-sections' "$build_script"
+grep -q -- '-fdata-sections' "$build_script"
+grep -q -- '-Wl,--gc-sections' "$build_script"
+grep -q -- '-Wl,--icf=safe' "$build_script"
+if grep -q -- '--whole-archive' "$build_script"; then
+    echo "libdovi is still linked as a whole archive" >&2
+    exit 1
+fi
+grep -q 'std::memchr' "$repository_root/native/src/dovi.cpp"
+if grep -q 'memcpy(data, transformed.data()' "$repository_root/native/src/dovi.cpp"; then
+    echo "transform output is still copied from a full-sample staging vector" >&2
+    exit 1
+fi
+grep -q 'jboolean is_copy = JNI_FALSE' "$jni_source"
+grep -q 'GetByteArrayElements(array_, &is_copy)' "$jni_source"
+grep -q 'observed_generation.load(std::memory_order_acquire) == generation' \
+    "$repository_root/native/src/dovi_mpv_state.cpp"
 grep -q -- '-Wl,-soname,libjellyfin_dovi.so' "$build_script"
 unstable_type='DoviRpu''DataHeader'
 if grep -q "$unstable_type" "$capi_header"; then

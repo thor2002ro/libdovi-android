@@ -1,0 +1,76 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.github.thor2002ro",
+    "module": "libdovi-android",
+    "version": "0.1.1-thor",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "9.7.1"
+    }
+  },
+  "variants": [
+    {
+      "name": "releaseVariantReleaseApiPublication",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.2.10"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "libdovi-android-0.1.1-thor.aar",
+          "url": "libdovi-android-0.1.1-thor.aar",
+          "size": 5525077,
+          "sha512": "8d9a84f358a4587280310b8054401a0e83ed18e1529c4e755bf4b1c80ab2829ded358ae35a1c177bed98d4640ac87a395176ac56e8ae8f9e75df09d6c05ceaf3",
+          "sha256": "69b4a4d33578286e1ed6709fdb495610fd1e6182961e926177dbaa157c305fa7",
+          "sha1": "337c0224c3009c4a782c7a53f3e1dac861da2e49",
+          "md5": "bf98c54dd22ad94ee6125498341ccc89"
+        }
+      ]
+    },
+    {
+      "name": "releaseVariantReleaseRuntimePublication",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.2.10"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "libdovi-android-0.1.1-thor.aar",
+          "url": "libdovi-android-0.1.1-thor.aar",
+          "size": 5525077,
+          "sha512": "8d9a84f358a4587280310b8054401a0e83ed18e1529c4e755bf4b1c80ab2829ded358ae35a1c177bed98d4640ac87a395176ac56e8ae8f9e75df09d6c05ceaf3",
+          "sha256": "69b4a4d33578286e1ed6709fdb495610fd1e6182961e926177dbaa157c305fa7",
+          "sha1": "337c0224c3009c4a782c7a53f3e1dac861da2e49",
+          "md5": "bf98c54dd22ad94ee6125498341ccc89"
+        }
+      ]
+    }
+  ]
+}

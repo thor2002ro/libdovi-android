@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>io.github.thor2002ro</groupId>
+  <artifactId>libdovi-android</artifactId>
+  <versioning>
+    <latest>0.1.1-thor</latest>
+    <release>0.1.1-thor</release>
+    <versions>
+      <version>0.1.0-SNAPSHOT</version>
+      <version>0.1.1-thor</version>
+    </versions>
+    <lastUpdated>20260930123101</lastUpdated>
+  </versioning>
+</metadata>

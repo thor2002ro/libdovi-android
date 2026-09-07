@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.library") version "9.3.2" apply false
+    id("com.android.library") version "9.4.1" apply false
 }
 
 group = "io.github.thor2002ro"
